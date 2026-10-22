@@ -1311,8 +1311,8 @@ importers:
         specifier: 10.71.0
         version: 10.71.0
       '@storybook/addon-a11y':
-        specifier: 10.6.0
-        version: 10.6.0(storybook@10.6.0(@types/react@19.2.18)(react@19.2.8))
+        specifier: 10.6.2
+        version: 10.6.2(storybook@10.6.0(@types/react@19.2.18)(react@19.2.8))
       '@storybook/addon-docs':
         specifier: 10.6.0
         version: 10.6.0(@types/react-dom@19.2.5(@types/react@19.2.18))(@types/react@19.2.18)(storybook@10.6.0(@types/react@19.2.18)(react@19.2.8))
@@ -5038,10 +5038,10 @@ packages:
   '@statsig/js-client@3.31.0':
     resolution: {integrity: sha512-LFa5E0LjT6sTfZv3sNGoyRLSZ1078+agdgOA+Vm1ecjG+KbSOfBLTW7hMwimrJ29slRwbYDzbtKaPJo/R37N2g==}
 
-  '@storybook/addon-a11y@10.6.0':
-    resolution: {integrity: sha512-Z/CZor/F8H74/+IoeLroEQXQoVxvmjVtUgATJ95KPBolHxMaHLXLsYU0wosIiiORxmfRCnpen5pQl1n4+pBWQw==}
+  '@storybook/addon-a11y@10.6.2':
+    resolution: {integrity: sha512-zleS+btwrTRcUf3opbZntKsEt6PTqAtxsek08tx5jh5fRvd6wWmtnwW3uaBcypfIKnheTB3KGljJwFX+Mc+Umg==}
     peerDependencies:
-      storybook: ^10.6.0
+      storybook: ^10.6.2
 
   '@storybook/addon-docs@10.6.0':
     resolution: {integrity: sha512-Fk3rUQWeGyCfL170OkmRp6Ruyv7MHPb/xrKa6YNk7FlGmlVLi5tKzh2T/0J13vWEy8wiu2MV3IBu8iRsaUR+Cw==}
@@ -5897,6 +5897,10 @@ packages:
 
   axe-core@4.13.0:
     resolution: {integrity: sha512-UzGt8zg7Ny8djbYMhxl2zuEevVa7r2gJjYY5Lwr1xM7+XU2nd6CkIWFTVcCIbAP63vSz71NaVyyuSk9lHKcy0A==}
+    engines: {node: '>=4'}
+
+  axe-core@4.14.0:
+    resolution: {integrity: sha512-9WTZxEjsZ7b13TH8JPmbV2z8CHbl80/2hm3XPEG4JgNdQLK81IBRXmSxHfMAOkSqQeRxT/0dwNDz2GOm3zzpcQ==}
     engines: {node: '>=4'}
 
   axios@1.20.0:
@@ -13148,10 +13152,10 @@ snapshots:
     dependencies:
       '@statsig/client-core': 3.31.0
 
-  '@storybook/addon-a11y@10.6.0(storybook@10.6.0(@types/react@19.2.18)(react@19.2.8))':
+  '@storybook/addon-a11y@10.6.2(storybook@10.6.0(@types/react@19.2.18)(react@19.2.8))':
     dependencies:
       '@storybook/global': 5.0.0
-      axe-core: 4.13.0
+      axe-core: 4.14.0
       storybook: 10.6.0(@types/react@19.2.18)(react@19.2.8)
 
   '@storybook/addon-docs@10.6.0(@types/react-dom@19.2.5(@types/react@19.2.18))(@types/react@19.2.18)(storybook@10.6.0(@types/react@19.2.18)(react@19.2.8))':
@@ -13971,6 +13975,8 @@ snapshots:
   aws4fetch@1.0.20: {}
 
   axe-core@4.13.0: {}
+
+  axe-core@4.14.0: {}
 
   axios@1.20.0:
     dependencies:
