@@ -83,9 +83,12 @@ This is the right state for:
 
 Entering `blocked` requires a routable waiting path. An issue may transition into `blocked` only with at least one of:
 
-- first-class blockers (`blockedByIssueIds`)
+- first-class blockers (`blockedByIssueIds`) that can still resolve — a cancelled blocker never fires `issue_blockers_resolved`
 - a pending issue-thread interaction or linked approval that names the responder
 - a structured unblock descriptor naming `{owner, action}`, where `owner` is an agent id, user id, or the board, and `action` is the concrete step that unblocks the issue
+- a scheduled issue monitor (`monitorNextCheckAt`), which re-wakes the assignee on a timer
+
+The rule applies to every write, not only the transition into `blocked`. A write that would leave an issue `blocked` without one of those wake paths returns it to `todo` instead of parking it: a blocked issue with no wake path is skipped by every heartbeat, so nothing can ever wake its assignee again. A write that explicitly requests `status: "blocked"` without a wake path is rejected with `invalid_issue_disposition` (`missing: "wake_path"`). A periodic backstop applies the same rule to issues that were parked before the rule existed: it returns them to `todo`, records `issue.blocked_wake_path_missing`, and wakes the assignee.
 
 When a structured unblock descriptor is the waiting path, Paperclip immediately notifies the named owner: an agent owner gets a wake, a user or board owner gets an inbox notification. Prose-only blocked — free-text that names an owner or action in a comment without any of the paths above — routes to nobody. It is rejected at the API or auto-classified as `needs_attention` with a board notification, never silently accepted as a healthy waiting state.
 

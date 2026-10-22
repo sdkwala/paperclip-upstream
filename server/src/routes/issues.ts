@@ -351,6 +351,14 @@ import { externalObjectService } from "../services/external-objects.js";
 import { getExternalChannelBindingSummary } from "../services/chat-channel-binding.js";
 import { deliverAgentUnblockNotification } from "../services/routable-blocked.js";
 import {
+  BLOCKED_WAKE_PATH_VALID_PATHS,
+  blockedWakePathRequirementMessage,
+  hasLiveBlockedWakePath,
+  isScheduledMonitorLive,
+  resolveScheduledMonitorNextCheckAt,
+  type BlockedWakePathFacts,
+} from "../services/blocked-wake-path.js";
+import {
   assertIssueReviewVerdictActorAllowed,
   isIssueReviewVerdictInteraction,
   resolveIssueReviewRequester,
@@ -14198,65 +14206,102 @@ export function issueRoutes(
       }
       const enteringBlocked =
         existing.status !== "blocked" && updateFields.status === "blocked";
-      if (enteringBlocked) {
+      // A blocked issue is skipped by every heartbeat, so it only ever comes
+      // back when something can wake it. Compute the wake paths that would
+      // survive this write and refuse the write when none would.
+      const explicitBlockedRequest = updateFields.status === "blocked";
+      const blockedAfterUpdate =
+        !effectiveMoveToTodoRequested &&
+        (updateFields.status ?? existing.status) === "blocked";
+      let blockedWakePathDemoted = false;
+      if (blockedAfterUpdate) {
         const requestedBlockerIds = Array.isArray(req.body.blockedByIssueIds)
           ? [...new Set(req.body.blockedByIssueIds as string[])]
           : null;
+        // Only a blocker edge that can still resolve is a wake path: the
+        // `issue_blockers_resolved` wake fires when the blocker completes, and
+        // a cancelled blocker never completes.
+        const blockerIsStillOpen = (status: string | null) =>
+          status === null || (status !== "done" && status !== "cancelled");
         const hasUnresolvedBlocker = requestedBlockerIds
-          ? requestedBlockerIds.length > 0 &&
-            (await db
-              .select({ id: issueRows.id })
-              .from(issueRows)
-              .where(
-                and(
-                  eq(issueRows.companyId, existing.companyId),
-                  inArray(issueRows.id, requestedBlockerIds),
-                  notInArray(issueRows.status, ["done", "cancelled"]),
-                ),
+          ? (
+              await Promise.all(
+                requestedBlockerIds.map(async (blockerIssueId) => {
+                  const blocker = await svc.getById(blockerIssueId).catch(() => null);
+                  return blocker?.status ?? null;
+                }),
               )
-              .limit(1)
-              .then((rows) => rows.length > 0))
-          : (await svc.getDependencyReadiness(existing.id))
-              .unresolvedBlockerCount > 0;
-        const [pendingInteraction, pendingApproval] = await Promise.all([
-          db
-            .select({ id: issueThreadInteractions.id })
-            .from(issueThreadInteractions)
-            .where(
-              and(
-                eq(issueThreadInteractions.companyId, existing.companyId),
-                eq(issueThreadInteractions.issueId, existing.id),
-                eq(issueThreadInteractions.status, "pending"),
-                activeIssueInteractionCondition(),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-          db
-            .select({ id: approvals.id })
-            .from(issueApprovals)
-            .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
-            .where(
-              and(
-                eq(issueApprovals.companyId, existing.companyId),
-                eq(issueApprovals.issueId, existing.id),
-                eq(approvals.status, "pending"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-        ]);
-        if (
-          !hasUnresolvedBlocker &&
-          !pendingInteraction &&
-          !pendingApproval &&
-          !descriptor
-        ) {
-          res.status(422).json({
-            error:
-              "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor",
-          });
-          return;
+            ).some(blockerIsStillOpen)
+          : (await svc.getRelationSummaries(existing.id)).blockedBy.some(
+              (relation) => blockerIsStillOpen(relation.status),
+            );
+        const [pendingInteraction, pendingApproval] = hasUnresolvedBlocker
+          ? [null, null]
+          : await Promise.all([
+              typeof issueThreadInteractionsSvc.listForIssue === "function"
+                ? issueThreadInteractionsSvc
+                    .listForIssue(existing.id)
+                    .then((interactions) =>
+                      interactions.some(
+                        (interaction) => interaction.status === "pending",
+                      )
+                        ? { id: existing.id }
+                        : null,
+                    )
+                : null,
+              typeof issueApprovalsSvc.listApprovalsForIssue === "function"
+                ? issueApprovalsSvc
+                    .listApprovalsForIssue(existing.id)
+                    .then((linkedApprovals) =>
+                      linkedApprovals.some(
+                        (approval) => approval.status === "pending",
+                      )
+                        ? { id: existing.id }
+                        : null,
+                    )
+                : null,
+            ]);
+        const resultingDescriptor =
+          updateFields.unblockDescriptor === undefined
+            ? existing.unblockDescriptor
+            : updateFields.unblockDescriptor;
+        const resultingMonitorNextCheckAt = resolveScheduledMonitorNextCheckAt({
+          monitorNextCheckAt: existing.monitorNextCheckAt,
+          policyMonitorNextCheckAt:
+            normalizeIssueExecutionPolicy(existing.executionPolicy)?.monitor
+              ?.nextCheckAt ?? null,
+          patchExecutionPolicy: updateFields.executionPolicy,
+        });
+        // An active workspace repair owns the issue and resolves the blocked
+        // state itself, so the issue is not stranded.
+        const workspaceRepairRequired = Boolean(
+          (await getExecutionBlocker(db, existing.companyId, existing.id))
+            ?.workspaceRepairRequired,
+        );
+        const blockedWakePath: BlockedWakePathFacts = {
+          hasUnresolvedBlocker,
+          hasUnblockDescriptor: Boolean(resultingDescriptor),
+          hasPendingInteraction: Boolean(pendingInteraction),
+          hasPendingApproval: Boolean(pendingApproval),
+          hasScheduledMonitor: isScheduledMonitorLive(resultingMonitorNextCheckAt),
+          hasWorkspaceRepairHold: workspaceRepairRequired,
+        };
+        if (!hasLiveBlockedWakePath(blockedWakePath)) {
+          if (explicitBlockedRequest) {
+            res.status(422).json({
+              error: blockedWakePathRequirementMessage(),
+              code: "invalid_issue_disposition",
+              missing: "wake_path",
+              validWakePaths: [...BLOCKED_WAKE_PATH_VALID_PATHS],
+            });
+            return;
+          }
+          // The write would leave the issue parked in `blocked` with nothing
+          // able to wake it again. Return it to the actionable queue instead
+          // of stranding it: a blocked issue with no wake path is skipped by
+          // every heartbeat and can never come back on its own.
+          updateFields.status = "todo";
+          blockedWakePathDemoted = true;
         }
       }
       if (
@@ -14904,7 +14949,7 @@ export function issueRoutes(
       const statusChangedFromBlockedToTodo =
         existing.status === "blocked" &&
         issue.status === "todo" &&
-        (req.body.status !== undefined || reopened);
+        (req.body.status !== undefined || reopened || blockedWakePathDemoted);
       const revalidatedRecoveryAction =
         await revalidateActiveSourceRecoveryAfterCommittedWrite({
           issue,
@@ -14987,6 +15032,28 @@ export function issueRoutes(
             ),
           },
         });
+
+      if (blockedWakePathDemoted) {
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+          responsibleUserIdOverride: authenticatedActorResponsibleUserId(req),
+          action: "issue.blocked_wake_path_missing",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            demotedFrom: existing.status,
+            demotedTo: issue.status,
+            validWakePaths: [...BLOCKED_WAKE_PATH_VALID_PATHS],
+            reason: blockedWakePathRequirementMessage(),
+          },
+        });
+      }
 
       if (
         existing.status === "in_progress" &&

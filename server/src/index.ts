@@ -1674,6 +1674,14 @@ async function startServerWithDatabaseTeardown(
           );
         }
 
+        const strandedBlockedReconciled = await heartbeat.reconcileStrandedBlockedIssues();
+        if (strandedBlockedReconciled.demoted > 0) {
+          logger.warn(
+            { ...strandedBlockedReconciled },
+            "startup stranded-blocked reconciliation returned parked issues to the actionable queue",
+          );
+        }
+
         const taskWatchdogsReconciled = await heartbeat.reconcileTaskWatchdogs();
         if (taskWatchdogsReconciled.triggered > 0) {
           logger.warn(
@@ -1879,6 +1887,12 @@ async function startServerWithDatabaseTeardown(
               const reconciled = await heartbeat.reconcileResolvedDependencyWakes();
               if (reconciled.healed > 0) {
                 logger.warn({ ...reconciled }, "periodic dependency-wake reconciliation restored task execution paths");
+              }
+            })
+            .then(async () => {
+              const reconciled = await heartbeat.reconcileStrandedBlockedIssues();
+              if (reconciled.demoted > 0) {
+                logger.warn({ ...reconciled }, "periodic stranded-blocked reconciliation returned parked issues to the actionable queue");
               }
             })
             .then(async () => {
