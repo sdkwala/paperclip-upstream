@@ -78,6 +78,7 @@ import {
   hasCompanyAccess,
 } from "./authz.js";
 import { validateInstanceConfig } from "../services/plugin-config-validator.js";
+import { validatePluginConfigPolicy } from "../services/plugin-config-policy.js";
 import {
   findLocalFolderDeclaration,
   getStoredLocalFolders,
@@ -2383,6 +2384,18 @@ export function pluginRoutes(
       }
     }
 
+    // Host-side plugin configuration policy guardrails (e.g. Telegram allowlists).
+    // These are intentionally independent of the plugin manifest schema so they
+    // also cover older plugin builds.
+    const policyValidation = validatePluginConfigPolicy(plugin.pluginKey, body.configJson);
+    if (!policyValidation.valid) {
+      res.status(400).json({
+        error: "Configuration does not satisfy plugin host policy",
+        fieldErrors: policyValidation.errors,
+      });
+      return;
+    }
+
     try {
       const secretRefs = extractSecretRefBindingsFromConfig(body.configJson, schema);
       await validatePluginSecretRefsForCompany(companyId, secretRefs);
@@ -2516,6 +2529,18 @@ export function pluginRoutes(
         });
         return;
       }
+    }
+
+    // Host-side plugin configuration policy guardrails (e.g. Telegram allowlists).
+    // These are intentionally independent of the plugin manifest schema so they
+    // also cover older plugin builds.
+    const policyValidation = validatePluginConfigPolicy(plugin.pluginKey, body.configJson);
+    if (!policyValidation.valid) {
+      res.status(400).json({
+        error: "Configuration does not satisfy plugin host policy",
+        fieldErrors: policyValidation.errors,
+      });
+      return;
     }
 
     try {
