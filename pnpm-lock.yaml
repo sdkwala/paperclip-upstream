@@ -535,8 +535,8 @@ importers:
         version: 1.9.1
     optionalDependencies:
       '@github/copilot-darwin-arm64':
-        specifier: 1.0.88
-        version: 1.0.88
+        specifier: 1.0.99
+        version: 1.0.99
       '@github/copilot-darwin-x64':
         specifier: 1.0.88
         version: 1.0.88
@@ -1102,8 +1102,8 @@ importers:
         version: 4.4.3
     optionalDependencies:
       '@github/copilot-darwin-arm64':
-        specifier: 1.0.88
-        version: 1.0.88
+        specifier: 1.0.99
+        version: 1.0.99
       '@github/copilot-darwin-x64':
         specifier: 1.0.88
         version: 1.0.88
@@ -2696,8 +2696,8 @@ packages:
   '@floating-ui/utils@0.2.12':
     resolution: {integrity: sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww==}
 
-  '@github/copilot-darwin-arm64@1.0.88':
-    resolution: {integrity: sha512-gt52dl+ja+G88RjLuSec59fA8C9HNfdGxKwwqE7eAIJXZYSKwKvuMy4B79WlCtlpnH/QKbs5Z9VsU0BTxe3EAg==}
+  '@github/copilot-darwin-arm64@1.0.99':
+    resolution: {integrity: sha512-lRXtvrWVGWO511hyFvAHTO5gqoMi07I4UaEAoWZ1wMBX1c2l0/4R9sXXwJeMEG2cS4jyICGxXIRvRh3qZSLLnA==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
@@ -10802,7 +10802,7 @@ snapshots:
 
   '@floating-ui/utils@0.2.12': {}
 
-  '@github/copilot-darwin-arm64@1.0.88':
+  '@github/copilot-darwin-arm64@1.0.99':
     optional: true
 
   '@github/copilot-darwin-x64@1.0.88':
