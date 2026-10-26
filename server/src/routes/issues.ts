@@ -14235,36 +14235,54 @@ export function issueRoutes(
           : (await svc.getRelationSummaries(existing.id)).blockedBy.some(
               (relation) => blockerIsStillOpen(relation.status),
             );
-        const [pendingInteraction, pendingApproval] = hasUnresolvedBlocker
-          ? [null, null]
-          : await Promise.all([
-              db
-                .select({ id: issueThreadInteractions.id })
-                .from(issueThreadInteractions)
-                .where(
-                  and(
-                    eq(issueThreadInteractions.companyId, existing.companyId),
-                    eq(issueThreadInteractions.issueId, existing.id),
-                    eq(issueThreadInteractions.status, "pending"),
-                    activeIssueInteractionCondition(),
-                  ),
-                )
-                .limit(1)
-                .then((rows) => rows[0] ?? null),
-              db
-                .select({ id: approvals.id })
-                .from(issueApprovals)
-                .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
-                .where(
-                  and(
-                    eq(issueApprovals.companyId, existing.companyId),
-                    eq(issueApprovals.issueId, existing.id),
-                    eq(approvals.status, "pending"),
-                  ),
-                )
-                .limit(1)
-                .then((rows) => rows[0] ?? null),
-            ]);
+        let pendingInteraction: { id: string } | null = null;
+        let pendingApproval: { id: string } | null = null;
+        if (!hasUnresolvedBlocker) {
+          // Lookups are best-effort: a mocked or partially available database
+          // (no `select`) must not turn an ordinary blocked write into a 500.
+          try {
+            if (typeof db?.select === "function") {
+              [pendingInteraction, pendingApproval] = await Promise.all([
+                db
+                  .select({ id: issueThreadInteractions.id })
+                  .from(issueThreadInteractions)
+                  .where(
+                    and(
+                      eq(issueThreadInteractions.companyId, existing.companyId),
+                      eq(issueThreadInteractions.issueId, existing.id),
+                      eq(issueThreadInteractions.status, "pending"),
+                      activeIssueInteractionCondition(),
+                    ),
+                  )
+                  .limit(1)
+                  .then((rows: any) => rows[0] ?? null),
+                db
+                  .select({ id: approvals.id })
+                  .from(issueApprovals)
+                  .innerJoin(
+                    approvals,
+                    eq(issueApprovals.approvalId, approvals.id),
+                  )
+                  .where(
+                    and(
+                      eq(issueApprovals.companyId, existing.companyId),
+                      eq(issueApprovals.issueId, existing.id),
+                      eq(approvals.status, "pending"),
+                    ),
+                  )
+                  .limit(1)
+                  .then((rows: any) => rows[0] ?? null),
+              ]);
+            }
+          } catch (err) {
+            console.warn(
+              "[blocked-wake-path] pending interaction/approval lookup failed; treating as none",
+              err,
+            );
+            pendingInteraction = null;
+            pendingApproval = null;
+          }
+        }
         const resultingDescriptor =
           updateFields.unblockDescriptor === undefined
             ? existing.unblockDescriptor
