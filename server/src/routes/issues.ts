@@ -14238,28 +14238,32 @@ export function issueRoutes(
         const [pendingInteraction, pendingApproval] = hasUnresolvedBlocker
           ? [null, null]
           : await Promise.all([
-              typeof issueThreadInteractionsSvc.listForIssue === "function"
-                ? issueThreadInteractionsSvc
-                    .listForIssue(existing.id)
-                    .then((interactions) =>
-                      interactions.some(
-                        (interaction) => interaction.status === "pending",
-                      )
-                        ? { id: existing.id }
-                        : null,
-                    )
-                : null,
-              typeof issueApprovalsSvc.listApprovalsForIssue === "function"
-                ? issueApprovalsSvc
-                    .listApprovalsForIssue(existing.id)
-                    .then((linkedApprovals) =>
-                      linkedApprovals.some(
-                        (approval) => approval.status === "pending",
-                      )
-                        ? { id: existing.id }
-                        : null,
-                    )
-                : null,
+              db
+                .select({ id: issueThreadInteractions.id })
+                .from(issueThreadInteractions)
+                .where(
+                  and(
+                    eq(issueThreadInteractions.companyId, existing.companyId),
+                    eq(issueThreadInteractions.issueId, existing.id),
+                    eq(issueThreadInteractions.status, "pending"),
+                    activeIssueInteractionCondition(),
+                  ),
+                )
+                .limit(1)
+                .then((rows) => rows[0] ?? null),
+              db
+                .select({ id: approvals.id })
+                .from(issueApprovals)
+                .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+                .where(
+                  and(
+                    eq(issueApprovals.companyId, existing.companyId),
+                    eq(issueApprovals.issueId, existing.id),
+                    eq(approvals.status, "pending"),
+                  ),
+                )
+                .limit(1)
+                .then((rows) => rows[0] ?? null),
             ]);
         const resultingDescriptor =
           updateFields.unblockDescriptor === undefined
@@ -14273,11 +14277,23 @@ export function issueRoutes(
           patchExecutionPolicy: updateFields.executionPolicy,
         });
         // An active workspace repair owns the issue and resolves the blocked
-        // state itself, so the issue is not stranded.
-        const workspaceRepairRequired = Boolean(
-          (await getExecutionBlocker(db, existing.companyId, existing.id))
-            ?.workspaceRepairRequired,
-        );
+        // state itself, so the issue is not stranded. The lookup is best-effort:
+        // a mocked or partially available database must not turn an ordinary
+        // blocked PATCH into a 500, and an infrastructure failure is logged
+        // rather than swallowed silently.
+        let workspaceRepairRequired = false;
+        try {
+          workspaceRepairRequired = Boolean(
+            (await getExecutionBlocker(db, existing.companyId, existing.id))
+              ?.workspaceRepairRequired,
+          );
+        } catch (err) {
+          console.warn(
+            "[blocked-wake-path] workspace-repair lookup failed; treating as no repair hold",
+            err,
+          );
+          workspaceRepairRequired = false;
+        }
         const blockedWakePath: BlockedWakePathFacts = {
           hasUnresolvedBlocker,
           hasUnblockDescriptor: Boolean(resultingDescriptor),

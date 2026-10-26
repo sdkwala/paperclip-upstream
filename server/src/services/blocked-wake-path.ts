@@ -37,7 +37,7 @@ export type BlockedWakePathFacts = {
    * An active workspace repair owns the issue. The repair process resolves the
    * blocked state itself, so the issue is not stranded.
    */
-  hasWorkspaceRepairHold: boolean;
+  hasWorkspaceRepairHold?: boolean;
 };
 
 export const BLOCKED_WAKE_PATH_KINDS = [
