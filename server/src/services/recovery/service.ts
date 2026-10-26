@@ -17,6 +17,14 @@ import {
 import { CONTROLLER_LEASE_LOST_FAILURE_CODE, hasLiveLegacyController } from "../legacy-controller-lease.js";
 import { isCompletedOnboardingHandoffWake } from "../chat-completion-delivery.js";
 import { instanceSettingsService } from "../instance-settings.js";
+import { getExecutionBlocker } from "../execution-blocker.js";
+import {
+  BLOCKED_WAKE_PATH_VALID_PATHS,
+  hasLiveBlockedWakePath,
+  isScheduledMonitorLive,
+  resolveScheduledMonitorNextCheckAt,
+  type BlockedWakePathFacts,
+} from "../blocked-wake-path.js";
 import { isWaitingConversation, settleConversationTurn, deliverConversationComments } from "../agent-conversations.js";
 import {
   and,
@@ -28,6 +36,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  lte,
   not,
   notExists,
   notInArray,
@@ -189,6 +198,15 @@ const STRANDED_BOARD_ESCALATION_POLICY = "board_escalation_no_takeover_v1";
 const DISPOSITION_REPAIR_IDEMPOTENCY_INDEX =
   "agent_wakeup_requests_disposition_repair_idempotency_uq";
 const RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT = 500;
+
+// A blocked issue only gets revisited when something can wake it. These
+// windows keep the stranded-blocked reconciler from racing a block that was
+// just written (the writer may still be attaching a descriptor, a blocker
+// edge, or a recovery action) and from re-demoting the same issue in a loop.
+const STRANDED_BLOCKED_RECONCILE_GRACE_MS = 10 * 60 * 1000;
+const STRANDED_BLOCKED_RECONCILE_COOLDOWN_MS = 60 * 60 * 1000;
+const STRANDED_BLOCKED_RECONCILE_CANDIDATE_LIMIT = 200;
+const STRANDED_BLOCKED_WAKE_REASON = "issue_blocked_wake_path_missing";
 
 // GGU-809: when a stranded `in_progress` issue would otherwise hit the
 // `isRepeatedProductiveContinuationRecovery` escalation path, exempt the
@@ -5999,6 +6017,311 @@ export function recoveryService(
     return result;
   }
 
+  /**
+   * Backstop reconciler for stranded blocked issues.
+   *
+   * A `blocked` issue only comes back when something can wake it: an open
+   * first-class blocker edge, a structured unblock descriptor, a pending
+   * interaction/approval, or a scheduled monitor. The heartbeat procedure
+   * skips `blocked` issues, so a parked issue with none of those is a dead
+   * end: nothing can ever wake its assignee and it never reaches a terminal
+   * status on its own.
+   *
+   * This finds those issues, returns them to the actionable queue, and wakes
+   * the assignee so the work is picked up instead of stranding. It never
+   * touches an issue that still has a live path, an active run, a pending
+   * wake, a pause hold, or an active recovery action (the board already owns
+   * that one).
+   */
+  async function reconcileStrandedBlockedIssues(opts?: {
+    runId?: string | null;
+    companyId?: string | null;
+    now?: Date;
+  }) {
+    const now = opts?.now ?? new Date();
+    const graceCutoff = new Date(
+      now.getTime() - STRANDED_BLOCKED_RECONCILE_GRACE_MS,
+    );
+    const result = {
+      checked: 0,
+      demoted: 0,
+      livePathSkipped: 0,
+      executionPathSkipped: 0,
+      interactionSkipped: 0,
+      pauseHoldSkipped: 0,
+      recoveryActionSkipped: 0,
+      cooldownSkipped: 0,
+      enqueueFailed: 0,
+      issueIds: [] as string[],
+    };
+
+    const filters = [
+      eq(issues.status, "blocked"),
+      isNull(issues.conversationAgentId),
+      isNull(issues.assigneeUserId),
+      isNull(issues.hiddenAt),
+      sql`${issues.assigneeAgentId} is not null`,
+      sql`${issues.blockedTransitionAt} is not null`,
+      lte(issues.blockedTransitionAt, graceCutoff),
+    ];
+    if (opts?.companyId) filters.push(eq(issues.companyId, opts.companyId));
+
+    const candidates = await db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        identifier: issues.identifier,
+        assigneeAgentId: issues.assigneeAgentId,
+        unblockDescriptor: issues.unblockDescriptor,
+        monitorNextCheckAt: issues.monitorNextCheckAt,
+        executionPolicy: issues.executionPolicy,
+        blockedTransitionAt: issues.blockedTransitionAt,
+      })
+      .from(issues)
+      .where(and(...filters))
+      .orderBy(asc(issues.id))
+      .limit(STRANDED_BLOCKED_RECONCILE_CANDIDATE_LIMIT);
+
+    result.checked = candidates.length;
+
+    for (const candidate of candidates) {
+      const agentId = candidate.assigneeAgentId;
+      if (!agentId) continue;
+
+      const relationSummaries = await issuesSvc.getRelationSummaries(
+        candidate.id,
+      );
+      const blockedBy = relationSummaries.blockedBy;
+      // A cancelled blocker never fires `issue_blockers_resolved`, so an edge
+      // that is already cancelled is not a wake path either.
+      const hasUnresolvedBlocker = blockedBy.some(
+        (relation) =>
+          relation.status !== "done" && relation.status !== "cancelled",
+      );
+      const [pendingInteraction, pendingApproval, policyMonitorNextCheckAt] =
+        await Promise.all([
+          db
+            .select({ id: issueThreadInteractions.id })
+            .from(issueThreadInteractions)
+            .where(
+              and(
+                eq(issueThreadInteractions.companyId, candidate.companyId),
+                eq(issueThreadInteractions.issueId, candidate.id),
+                eq(issueThreadInteractions.status, "pending"),
+              ),
+            )
+            .limit(1)
+            .then((rows) => rows[0] ?? null),
+          db
+            .select({ id: approvals.id })
+            .from(issueApprovals)
+            .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+            .where(
+              and(
+                eq(issueApprovals.companyId, candidate.companyId),
+                eq(issueApprovals.issueId, candidate.id),
+                eq(approvals.status, "pending"),
+              ),
+            )
+            .limit(1)
+            .then((rows) => rows[0] ?? null),
+          Promise.resolve(
+            normalizeIssueExecutionPolicy(candidate.executionPolicy)?.monitor
+              ?.nextCheckAt ?? null,
+          ),
+        ]);
+      const monitorNextCheckAt = resolveScheduledMonitorNextCheckAt({
+        monitorNextCheckAt: candidate.monitorNextCheckAt,
+        policyMonitorNextCheckAt,
+      });
+      const blockedWakePath: BlockedWakePathFacts = {
+        hasUnresolvedBlocker,
+        hasUnblockDescriptor: Boolean(candidate.unblockDescriptor),
+        hasPendingInteraction: Boolean(pendingInteraction),
+        hasPendingApproval: Boolean(pendingApproval),
+        hasScheduledMonitor: isScheduledMonitorLive(monitorNextCheckAt, now),
+        hasWorkspaceRepairHold: false,
+      };
+      // An active workspace repair owns the issue and resolves the blocked
+      // state itself, so it is not stranded.
+      const workspaceRepairRequired = Boolean(
+        (await getExecutionBlocker(db, candidate.companyId, candidate.id))
+          ?.workspaceRepairRequired,
+      );
+      blockedWakePath.hasWorkspaceRepairHold = workspaceRepairRequired;
+      if (hasLiveBlockedWakePath(blockedWakePath)) {
+        result.livePathSkipped += 1;
+        continue;
+      }
+
+      if (
+        (await hasActiveExecutionPath(candidate.companyId, candidate.id, agentId)) ||
+        (await hasQueuedIssueWake(candidate.companyId, candidate.id, agentId))
+      ) {
+        result.executionPathSkipped += 1;
+        continue;
+      }
+
+      if (await hasPendingWakeInteraction(candidate.companyId, candidate.id)) {
+        result.interactionSkipped += 1;
+        continue;
+      }
+
+      if (
+        await isAutomaticRecoverySuppressedByPauseHold(
+          db,
+          candidate.companyId,
+          candidate.id,
+          treeControlSvc,
+        )
+      ) {
+        result.pauseHoldSkipped += 1;
+        continue;
+      }
+
+      // A board-visible recovery action already owns this issue. Leave it
+      // alone: the board decides what happens next.
+      const activeRecoveryAction =
+        await recoveryActionsSvc.getActiveForIssue(
+          candidate.companyId,
+          candidate.id,
+        );
+      if (activeRecoveryAction) {
+        result.recoveryActionSkipped += 1;
+        continue;
+      }
+
+      if (
+        await hasRecentStrandedBlockedDemotion(
+          candidate.companyId,
+          candidate.id,
+          now,
+        )
+      ) {
+        result.cooldownSkipped += 1;
+        continue;
+      }
+
+      try {
+        const updated = await issuesSvc.update(candidate.id, {
+          status: "todo",
+        });
+        if (!updated) {
+          result.enqueueFailed += 1;
+          continue;
+        }
+
+        await issuesSvc.addComment(
+          candidate.id,
+          "Paperclip moved this issue out of `blocked` because it had no live " +
+            "wake path: no open first-class blocker, no unblockDescriptor, no " +
+            "pending interaction or approval, and no scheduled monitor. A " +
+            "blocked issue with no wake path is skipped by every heartbeat and " +
+            "can never wake its assignee again. If this issue is genuinely " +
+            "waiting on something, park it again with a first-class blocker " +
+            "(`blockedByIssueIds`), an `unblockDescriptor` that names an owner " +
+            "and an exact action, or a scheduled monitor.",
+          {},
+          { authorType: "system" },
+        );
+
+        await logActivity(db, {
+          companyId: candidate.companyId,
+          actorType: "system",
+          actorId: "blocked_wake_path_reconciler",
+          agentId,
+          runId: opts?.runId ?? null,
+          action: "issue.blocked_wake_path_missing",
+          entityType: "issue",
+          entityId: candidate.id,
+          details: {
+            identifier: candidate.identifier,
+            demotedFrom: "blocked",
+            demotedTo: "todo",
+            blockedTransitionAt: candidate.blockedTransitionAt,
+            validWakePaths: [...BLOCKED_WAKE_PATH_VALID_PATHS],
+          },
+        });
+
+        result.demoted += 1;
+        result.issueIds.push(candidate.id);
+
+        const wake = await deps.enqueueWakeup(agentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: STRANDED_BLOCKED_WAKE_REASON,
+          payload: {
+            issueId: candidate.id,
+            backstop: "blocked_wake_path_reconciliation",
+            demotedFrom: "blocked",
+            demotedTo: "todo",
+          },
+          idempotencyKey: `issue-stranded-blocked:${candidate.id}:${candidate.blockedTransitionAt?.toISOString() ?? "none"}`,
+          requestedByActorType: "system",
+          requestedByActorId: "blocked_wake_path_reconciler",
+          contextSnapshot: {
+            issueId: candidate.id,
+            taskId: candidate.id,
+            wakeReason: STRANDED_BLOCKED_WAKE_REASON,
+            source: "blocked_wake_path_reconciliation",
+          },
+        });
+        if (!wake) {
+          result.enqueueFailed += 1;
+        }
+      } catch (err) {
+        result.enqueueFailed += 1;
+        logger.warn(
+          {
+            err,
+            issueId: candidate.id,
+            agentId,
+            companyId: candidate.companyId,
+          },
+          "failed to reconcile stranded blocked issue",
+        );
+      }
+    }
+
+    if (result.demoted > 0) {
+      logger.warn(
+        {
+          demoted: result.demoted,
+          issueIds: result.issueIds,
+        },
+        "reconciled blocked issues that had no live wake path",
+      );
+    }
+
+    return result;
+  }
+
+  async function hasRecentStrandedBlockedDemotion(
+    companyId: string,
+    issueId: string,
+    now: Date,
+  ) {
+    const cutoff = new Date(
+      now.getTime() - STRANDED_BLOCKED_RECONCILE_COOLDOWN_MS,
+    );
+    const row = await db
+      .select({ createdAt: activityLog.createdAt })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.companyId, companyId),
+          eq(activityLog.entityType, "issue"),
+          eq(activityLog.entityId, issueId),
+          eq(activityLog.action, "issue.blocked_wake_path_missing"),
+          gte(activityLog.createdAt, cutoff),
+        ),
+      )
+      .orderBy(desc(activityLog.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    return Boolean(row);
+  }
+
   function readRecoveryTimerIntervalMs(raw: unknown, fallback: number) {
     return Math.max(1, Math.floor(asNumber(raw, fallback)));
   }
@@ -6451,6 +6774,7 @@ export function recoveryService(
     legacyRepairDispatchBlock,
     sweepStaleIssueLocks,
     reconcileResolvedDependencyWakeBackstop,
+    reconcileStrandedBlockedIssues,
     readRecoveryTimerIntervalMs,
   };
 }

@@ -1631,6 +1631,16 @@ export function heartbeatService(
     return recovery.reconcileResolvedDependencyWakeBackstop(opts);
   }
 
+  // Backstop for blocked issues that lost their wake path: they are skipped by
+  // every heartbeat, so nothing else will ever pick them up again.
+  async function reconcileStrandedBlockedIssues(opts?: {
+    runId?: string | null;
+    companyId?: string | null;
+    now?: Date;
+  }) {
+    return recovery.reconcileStrandedBlockedIssues(opts);
+  }
+
   // Await every background heartbeat execution that is currently in flight. A
   // draining run can, in its finally block, promote and dispatch the next queued
   // run for the same agent — that follow-up execution is registered in the set
@@ -4094,6 +4104,7 @@ export function heartbeatService(
     sweepStaleIssueLocks,
 
     reconcileResolvedDependencyWakes,
+    reconcileStrandedBlockedIssues,
 
     scanSilentActiveRuns,
 

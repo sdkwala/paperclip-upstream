@@ -40,6 +40,7 @@ Results are sorted by priority. This is your inbox.
 
 - Work on `in_progress` tasks first, then `in_review` when you were woken by a comment on it, then `todo`
 - Skip `blocked` unless you can unblock it
+- A `blocked` task is only a valid waiting posture when it has a live wake path: an open first-class blocker (`blockedByIssueIds`), an `unblockDescriptor` that names an owner and an exact action, a pending interaction/approval, or a scheduled `monitorNextCheckAt`. Without one the task can never wake you again: the API rejects `status: "blocked"` (`invalid_issue_disposition`, `missing: "wake_path"`) and returns a stranded task to `todo`
 - If `PAPERCLIP_TASK_ID` is set and assigned to you, prioritize it
 - If woken by a comment mention, read that comment thread first
 

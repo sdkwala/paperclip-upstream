@@ -3100,7 +3100,16 @@ describe("agent issue mutation checkout ownership", () => {
       }));
 
       const app = await createApp(watchdogActor(), createWatchdogDb());
-      const res = await request(app).patch(`/api/issues/${issueId}`).send({ status });
+      const res = await request(app)
+        .patch(`/api/issues/${issueId}`)
+        .send({
+          status,
+          // A blocked issue only stays blocked when it has a live wake path,
+          // so the watchdog names the issue it is waiting on.
+          ...(status === "blocked"
+            ? { blockedByIssueIds: ["55555555-5555-4555-8555-555555555555"] }
+            : {}),
+        });
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
       expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status }));
